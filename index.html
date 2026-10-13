@@ -1136,6 +1136,31 @@ function scheduleRender(){
   if(isTyping()){ pendingRender = true; return; }
   pendingRender = false;
   render();
+  try{ jxRefreshBalanceModal(); }catch(e){}
+}
+/* ===== ADMIN: LIVE BALANCE LIST (add-only) — ব্যালেন্স তালিকা খোলা থাকলে ইউজার/এডমিন বদল সাথে সাথে দেখাবে ===== */
+function jxBalanceBodyHtml(){
+  const list = toArray(STATE.users).filter(u=>u && u.id && isActiveMember(u))
+    .sort((a,b)=>(Number(b.balance)||0)-(Number(a.balance)||0) || String(a.name||'').localeCompare(String(b.name||''),'bn'));
+  const TD = 'style="padding:6px 4px;border-bottom:1px dashed #e2e8f0;text-align:left;white-space:nowrap;font-size:12px;"';
+  const TH = 'style="padding:6px 4px;background:#f1f5f9;text-align:left;white-space:nowrap;font-size:11px;"';
+  return list.length
+    ? '<div class="hint">সক্রিয় মেম্বার: <b>'+list.length+'</b> জন • সবচেয়ে বেশি ব্যালেন্স আগে</div>'+
+      '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;"><thead><tr>'+
+      '<th '+TH+'>ক্রম</th><th '+TH+'>নাম</th><th '+TH+'>মোবাইল নম্বর</th><th '+TH+'>ব্যালেন্স</th><th '+TH+'>অবস্থান</th>'+
+      '</tr></thead><tbody>'+
+      list.map((u,i)=>'<tr><td '+TD+'>'+(i+1)+'</td><td '+TD+'>'+esc(u.name||'—')+'</td><td '+TD+'>'+esc(u.phone||u.myNumber||'—')+'</td><td '+TD+'>'+money(Number(u.balance)||0)+'</td><td '+TD+'>'+esc(u.level||'—')+'</td></tr>').join('')+
+      '</tbody></table></div>'
+    : '<div class="empty-state">কোনো সক্রিয় মেম্বার নেই</div>';
+}
+function jxRefreshBalanceModal(){
+  if(overlayEl.hidden) return;
+  const h = modalBoxEl.querySelector('h3');
+  if(!h || h.textContent !== 'ব্যালেন্স তালিকা') return;
+  const body = jxBalanceBodyHtml();
+  if(modalBoxEl.__balBody === body) return;
+  showModal('ব্যালেন্স তালিকা', body, [{label:'বন্ধ', cls:'ghost', onClick: dismissModal}]);
+  modalBoxEl.__balBody = body;
 }
 document.addEventListener('focusout', ()=>{
   if(!pendingRender) return;
@@ -1868,8 +1893,9 @@ function adminStatsBar(){
 
 function viewAdminWithdrawals(){
   const f = STATE.adminWFilter;
-  let all = sortDesc(toArray(STATE.withdrawals)).slice(0,80);
+  let all = sortDesc(toArray(STATE.withdrawals));
   if(f !== 'all') all = all.filter(w=>w.status === f);
+  else all = all.slice(0,80);
 
   return adminStatsBar()+
   '<div class="fade-swap">'+
@@ -2643,6 +2669,8 @@ function wthScheduleMsg(){
   if(t.mins>=960) return 'আজকের উত্তোলনের আবেদনের সময় শেষ হয়েছে (বিকাল ৪টা)। অনুগ্রহ করে পরবর্তী কার্যদিবসে সকাল ১০টা থেকে বিকাল ৪টার মধ্যে আবেদন করুন।';
   return '';
 }
+/* true = পেন্ডিং আবেদন থাকলেও নতুন আবেদন দেওয়া যাবে; আগের বাধা কোডে রাখা আছে */
+const JX_ALLOW_PENDING = true;
 let wthBusy=false;
 async function wthUnlock(uid,wid){ try{ await Store.transaction('indexes/withdrawLock/'+uid, cur=>cur===wid?null:undefined); }catch(e){} }
 async function wthSyncServerTime(){
@@ -2704,7 +2732,7 @@ function openWithdrawDialog(){
 
         if(wthBusy) return;
         if(me.lastWithdrawDay===wthDateKey()){ err.textContent='আজ একবার উত্তোলনের আবেদন দেওয়া হয়ে গেছে। দিনে একবারের বেশি উত্তোলন করা যাবে না।'; return; }
-        if(toArray(STATE.withdrawals).some(w=>w&&w.userId===me.id&&w.status==='pending')){ err.textContent='আপনার একটি উত্তোলন আবেদন ইতিমধ্যে পেন্ডিং আছে। যাচাই শেষ না হওয়া পর্যন্ত নতুন আবেদন দেওয়া যাবে না।'; return; }
+        if(!JX_ALLOW_PENDING && toArray(STATE.withdrawals).some(w=>w&&w.userId===me.id&&w.status==='pending')){ err.textContent='আপনার একটি উত্তোলন আবেদন ইতিমধ্যে পেন্ডিং আছে। যাচাই শেষ না হওয়া পর্যন্ত নতুন আবেদন দেওয়া যাবে না।'; return; }
         wthBusy=true;
         const wid='WTH-'+(Store.pushKey('withdrawals') || genId('WTH')).replace(/^WTH-/, '');
         const id = wid;
@@ -2713,7 +2741,13 @@ function openWithdrawDialog(){
           await wthSyncServerTime();
           if(await wthHolidayServer()){ err.textContent='আজ ছুটি ঘোষণা করা হয়েছে। তাই আজ উত্তোলনের আবেদন বন্ধ রয়েছে।'; return; }
           const wsm3=wthScheduleMsg(); if(wsm3){ err.textContent=wsm3; return; }
-          await wthClearStaleLock(me.id);
+          /* ডেটাবেসে সরাসরি দেখা: এই ইউজারের কোনো পেন্ডিং আবেদন আছে কিনা */
+          const allW = (await Store.once('withdrawals')) || {};
+          if(!JX_ALLOW_PENDING && Object.values(allW).some(w=>w && w.userId===me.id && w.status==='pending')){
+            err.textContent='আপনার একটি উত্তোলন আবেদন ইতিমধ্যে পেন্ডিং আছে। অ্যাডমিন অনুমোদন বা বাতিল করলে নতুন আবেদন দেওয়া যাবে।'; return;
+          }
+          /* কোনো পেন্ডিং আবেদন না থাকলে পুরোনো আটকে থাকা লক খুলে দেওয়া */
+          await Store.transaction('indexes/withdrawLock/'+me.id, cur=>cur?null:undefined);
           const lk = await Store.transaction('indexes/withdrawLock/'+me.id, cur=>cur?undefined:wid);
           if(!lk.committed){ err.textContent='আপনার আগের উত্তোলন আবেদন এখনো যাচাই হয়নি'; return; }
           lockHeld=true;
@@ -2739,6 +2773,7 @@ function openWithdrawDialog(){
             if(balDone){ try{ await Store.transaction('users/'+me.id, cur=>cur ? Object.assign({},cur,{balance:Number(cur.balance||0)+amt, lastWithdrawDay:''}) : cur); }catch(e){} }
             if(lockHeld) await wthUnlock(me.id,wid);
           }
+          if(saved && lockHeld) await wthUnlock(me.id,wid);
         }
         if(!saved) return;
         await addLog('WITHDRAW_REQUEST', me.id+' → '+money0(amt-f)+' ('+id+')', true);
@@ -3037,11 +3072,12 @@ document.addEventListener('click', async e=>{
     const lv = document.querySelector('select[data-u-lvl="'+id+'"]');
     const bl = document.querySelector('input[data-u-bal="'+id+'"]');
     if(!nm) return;
-    await Store.update('users/'+id, {
-      name: nm.value.trim() || 'User',
-      level: lv ? lv.value : 'M1',
-      balance: parseFloat(bl ? bl.value : 0) || 0
-    });
+    /* ব্যালেন্স শুধু তখনই লেখা হবে যখন অ্যাডমিন নিজে ঘরটি বদলায়; নইলে পুরোনো মান দিয়ে কাটা টাকা ফিরে আসত */
+    const patch = { name: nm.value.trim() || 'User', level: lv ? lv.value : 'M1' };
+    if(bl && bl.value !== bl.defaultValue) patch.balance = parseFloat(bl.value) || 0;
+    await Store.update('users/'+id, patch);
+    if(STATE.users && STATE.users[id]) Object.assign(STATE.users[id], patch);
+    scheduleRender();
     await addLog('USER_UPDATED', id+' এডমিন এডিট (Live)', true);
     if(lv && lv.value!=='M0') tryReferralBonus(id);
     toast('✓ ইউজার Live সেভ','ok');
